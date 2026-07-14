@@ -1,0 +1,553 @@
+
+      </div>
+    </div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    var cacheCatalogo = [];
+    var cachePacientes = [];
+    var currentPdfUrl = null;
+    var cacheERP = null;
+    var moduloERPActivo = 'vision';
+
+    // Variables globales para almacenar referencias cruzadas de Google Drive al procesar con IA
+    var currentDriveFolderId = null;
+    var currentDriveFileId = null;
+
+    function showToast(message, type) {
+      var toast = document.createElement('div');
+      toast.className = 'toast ' + type;
+      var icons = {
+        success: '<svg class="icon-sm" viewBox="0 0 24 24" stroke="#34c759"><path d="M20 6 9 17l-5-5"></path></svg>',
+        error: '<svg class="icon-sm" viewBox="0 0 24 24" stroke="#ff3b30"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>',
+        warning: '<svg class="icon-sm" viewBox="0 0 24 24" stroke="#ff9500"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
+        neutral: '<svg class="icon-sm" viewBox="0 0 24 24" stroke="#0071e3"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>'
+      };
+      toast.innerHTML = '<span class="toast-icon">' + icons[type] + '</span><span class="toast-message">' + message + '</span>';
+      document.body.appendChild(toast);
+      
+      setTimeout(function() {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(120%) scale(0.95)';
+        toast.style.transition = 'all 0.4s cubic-bezier(0.3, 0, 0.8, 0.15)';
+        setTimeout(function() { toast.remove(); }, 400);
+      }, 4000);
+    }
+
+    window.onload = function() {
+      document.getElementById('dsaForm').addEventListener('submit', enviarFormulario);
+      google.script.run
+        .withSuccessHandler(inicializarInterfaz)
+        .withFailureHandler(function(err) {
+          showToast('Error de conexión: ' + err.message, 'error');
+          document.getElementById('loader').style.display = 'none';
+        })
+        .obtenerDatosIniciales();
+    };
+
+    function inicializarInterfaz(datos) {
+      poblarDesplegable('id_tramite', datos.tramites, 'id_tramite', 'tipo_tramite');
+      var listaUnidades = datos.unidades.map(function(u) { return { id: u.id_uc, texto: u.uc_cod + ' - ' + u.uc_denominacion }; });
+      poblarDesplegable('id_uc', listaUnidades, 'id', 'texto');
+      poblarDesplegable('id_servicio', datos.servicios, 'id_servicio', 'nombre');
+      poblarDesplegable('id_usuario', datos.usuarios, 'id_usuario', 'nombre');
+      poblarDesplegable('id_estatus_tramite', datos.estatus, 'id_estatus_tramite', 'estatus_tramite');
+
+      cacheCatalogo = datos.catalogo || [];
+      cachePacientes = datos.pacientes || [];
+
+      if (datos.usuarioActual && datos.usuarioActual.id_usuario) {
+        var selectUsuario = document.getElementById('id_usuario');
+        for (var i = 0; i < selectUsuario.options.length; i++) {
+          if (String(selectUsuario.options[i].value) === String(datos.usuarioActual.id_usuario)) {
+            selectUsuario.selectedIndex = i;
+            break;
+          }
+        }
+      }
+
+      document.getElementById('loader').style.display = 'none';
+      agregarFilaArticulo();
+    }
+
+    function poblarDesplegable(elementId, dataset, valueKey, textKey) {
+      var select = document.getElementById(elementId);
+      dataset.forEach(function(item) {
+        var opt = document.createElement('option');
+        opt.value = item[valueKey];
+        opt.innerText = item[textKey];
+        select.appendChild(opt);
+      });
+    }
+
+    /* --- CONTROLADOR DE VISTAS --- */
+    function toggleView(viewId) {
+      var formView = document.getElementById('vistaFormulario');
+      var dashView = document.getElementById('vistaDashboard');
+      var opView = document.getElementById('vistaOperativa');
+      var erpView = document.getElementById('vistaERP');
+      
+      if (viewId === 'dashboard') {
+        formView.style.display = 'none';
+        opView.style.display = 'none';
+        erpView.style.display = 'none';
+        dashView.style.display = 'block';
+      } else if (viewId === 'operativa') {
+        formView.style.display = 'none';
+        dashView.style.display = 'none';
+        erpView.style.display = 'none';
+        opView.style.display = 'block';
+      } else if (viewId === 'erp') {
+        formView.style.display = 'none';
+        dashView.style.display = 'none';
+        opView.style.display = 'none';
+        erpView.style.display = 'block';
+      } else {
+        dashView.style.display = 'none';
+        opView.style.display = 'none';
+        erpView.style.display = 'none';
+        formView.style.display = 'block';
+      }
+      
+      var activeView = viewId === 'dashboard' ? dashView : (viewId === 'operativa' ? opView : (viewId === 'erp' ? erpView : formView));
+      activeView.classList.remove('view-container');
+      void activeView.offsetWidth; 
+      activeView.classList.add('view-container');
+      
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function dibujarGraficoFinanciero(resumen) {
+      var canvas = document.getElementById('graficaFinanciera');
+      if (!canvas) return;
+      var ctx = canvas.getContext('2d');
+      if (window.graficaFinancieraInstancia) {
+        window.graficaFinancieraInstancia.destroy();
+      }
+      window.graficaFinancieraInstancia = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Pagado', 'Por pagar'],
+          datasets: [{
+            data: [Number(resumen.pagado || 0), Number(resumen.porPagar || 0)],
+            backgroundColor: ['#34c759', '#ff3b30'],
+            borderWidth: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  return context.label + ': ' + formatoMoneda(context.parsed);
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    function cargarDashboardView() {
+      document.getElementById('loaderText').innerText = 'Recopilando métricas en tiempo real…';
+      document.getElementById('loader').style.display = 'flex';
+      
+      google.script.run
+        .withSuccessHandler(function(dashboard) {
+          var metricas = dashboard.metricas || dashboard;
+          document.getElementById('lblTotal').innerText = metricas.total;
+          document.getElementById('lblActivos').innerText = metricas.activos;
+          document.getElementById('lblCancelados').innerText = metricas.cancelados;
+          
+          var tbody = document.getElementById('tablaMetricasBody');
+          tbody.innerHTML = '';
+          
+          if (!metricas.recientes || metricas.recientes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding: 32px;">No se encontraron registros en Supabase</td></tr>';
+          } else {
+            metricas.recientes.forEach(function(r) {
+              var tr = document.createElement('tr');
+              var estadoHtml = r.cancelado_at ? '<span class="badge badge-danger">Cancelado</span>' : '<span class="badge badge-success">Activo</span>';
+              
+              tr.innerHTML = '<td style="font-weight:600;">' + (r.folio_dsa || '-') + '</td>' +
+                             '<td>' + (r.no_oficio || '-') + '</td>' +
+                             '<td>' + (r.fecha_recepcion || '-') + '</td>' +
+                             '<td style="color:var(--text-secondary);">' + (r.observaciones || '-') + '</td>' +
+                             '<td>' + estadoHtml + '</td>';
+              tbody.appendChild(tr);
+            });
+          }
+
+          if (dashboard.finanzas) {
+            dibujarGraficoFinanciero(dashboard.finanzas);
+          }
+          
+          document.getElementById('loader').style.display = 'none';
+          toggleView('dashboard');
+        })
+        .withFailureHandler(function(err) {
+          showToast('Error al procesar métricas: ' + err.message, 'error');
+          document.getElementById('loader').style.display = 'none';
+        })
+        .obtenerDashboardCompleto();
+    }
+
+    function cambiarAVistaFormulario() {
+      toggleView('form');
+    }
+
+    function formatoMoneda(valor) {
+      var numero = Number(valor || 0);
+      return numero.toLocaleString('es-MX', { style: 'currency', currency: 'MXN' });
+    }
+
+    function badgeEstado(texto) {
+      var normalizado = String(texto || 'Sin estado');
+      var cls = normalizado.toLowerCase().indexOf('activo') !== -1 || normalizado.toLowerCase().indexOf('entreg') !== -1 || normalizado.toLowerCase().indexOf('pag') !== -1 ? 'badge-success' : (normalizado.toLowerCase().indexOf('suspend') !== -1 || normalizado.toLowerCase().indexOf('cancel') !== -1 ? 'badge-danger' : 'badge-neutral');
+      return '<span class="badge ' + cls + '">' + normalizado + '</span>';
+    }
+
+    function cargarVistasOperativas() {
+      document.getElementById('loaderText').innerText = 'Componiendo vistas operativas…';
+      document.getElementById('loader').style.display = 'flex';
+      google.script.run
+        .withSuccessHandler(function(datos) {
+          renderizarVistasOperativas(datos);
+          document.getElementById('loader').style.display = 'none';
+          toggleView('operativa');
+        })
+        .withFailureHandler(function(err) {
+          showToast('Error al cargar vistas: ' + err.message, 'error');
+          document.getElementById('loader').style.display = 'none';
+        })
+        .obtenerVistasOperativas();
+    }
+
+    function renderizarVistasOperativas(datos) {
+      document.getElementById('opProveedores').innerText = datos.resumen.proveedores;
+      document.getElementById('opPedidos').innerText = datos.resumen.pedidos;
+      document.getElementById('opFacturas').innerText = datos.resumen.facturas;
+      document.getElementById('opCatalogo').innerText = datos.resumen.catalogo;
+
+      document.getElementById('tablaProveedoresBody').innerHTML = (datos.proveedores || []).map(function(p) {
+        return '<tr><td style="font-weight:600;">' + (p.nombre_proveedor || '-') + '</td><td>' + (p.rfc || '-') + '</td><td>' + (p.giro || '-') + '</td><td>' + (p.vigencia || '-') + '</td><td>' + (p.correo || p.telefono_1 || '-') + '</td><td>' + badgeEstado(p.estado_proveedor) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin proveedores para mostrar</td></tr>';
+
+      document.getElementById('tablaPedidosBody').innerHTML = (datos.pedidos || []).map(function(p) {
+        var caa = p.caa_autorizaciones || {};
+        return '<tr><td style="font-weight:600;">' + (p.no_pedido || '-') + '</td><td>' + (p.fecha_pedido || '-') + '</td><td>' + ((p.proveedores && p.proveedores.nombre_proveedor) || '-') + '</td><td>' + (caa.folio || '-') + '</td><td>' + ((caa.dsa && caa.dsa.folio_dsa) || '-') + '</td><td>' + badgeEstado(p.cancelado_at ? 'Cancelado' : ((p.estatus_entrega && p.estatus_entrega.estatus_entrega) || 'En seguimiento')) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin pedidos para mostrar</td></tr>';
+
+      document.getElementById('tablaFacturacionBody').innerHTML = (datos.facturacion || []).map(function(f) {
+        var factura = f.facturas || {};
+        var detalle = f.pedidos_detalles || {};
+        var dsaDetalle = detalle.dsa_detalles || {};
+        return '<tr><td style="font-weight:600;">' + (factura.no_factura || '-') + '</td><td>' + ((factura.proveedores && factura.proveedores.nombre_proveedor) || '-') + '</td><td>' + ((detalle.pedidos && detalle.pedidos.no_pedido) || '-') + '</td><td>' + ((dsaDetalle.catalogo && dsaDetalle.catalogo.descripcion) || '-') + '</td><td>' + formatoMoneda(f.importe_facturado) + '</td><td>' + formatoMoneda(f.importe_pagado) + '</td><td>' + (f.fecha_pago || '-') + '</td></tr>';
+      }).join('') || '<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin movimientos de facturación</td></tr>';
+
+      document.getElementById('tablaCatalogoBody').innerHTML = (datos.catalogoFinanciero || []).map(function(a) {
+        var cog = a.cog || {};
+        return '<tr><td style="font-weight:600;">' + (a.codigo_art || '-') + '</td><td>' + (a.descripcion || '-') + '</td><td>' + (cog.capitulo || cog.concepto || '-') + '</td><td>' + (cog.partida_especifica || '-') + '</td><td>' + formatoMoneda(a.precio_sin_iva) + '</td><td>' + (a.iva || 0) + '%</td></tr>';
+      }).join('') || '<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin artículos de catálogo</td></tr>';
+    }
+
+    function mostrarPanelOperativo(panel, boton) {
+      ['Proveedores', 'Pedidos', 'Facturacion', 'Catalogo'].forEach(function(nombre) {
+        document.getElementById('panel' + nombre).classList.remove('active');
+      });
+      document.getElementById('panel' + panel.charAt(0).toUpperCase() + panel.slice(1)).classList.add('active');
+      var botones = boton.parentNode.querySelectorAll('.segmented-item');
+      for (var i = 0; i < botones.length; i++) { botones[i].classList.remove('active'); }
+      boton.classList.add('active');
+    }
+
+    function cargarSuiteERP() {
+      document.getElementById('loaderText').innerText = 'Orquestando módulos ERP…';
+      document.getElementById('loader').style.display = 'flex';
+      google.script.run
+        .withSuccessHandler(function(datos) {
+          cacheERP = datos;
+          renderizarSuiteERP(datos);
+          document.getElementById('loader').style.display = 'none';
+          toggleView('erp');
+        })
+        .withFailureHandler(function(err) {
+          showToast('Error al cargar Suite ERP: ' + err.message, 'error');
+          document.getElementById('loader').style.display = 'none';
+        })
+        .obtenerSuiteERP();
+    }
+
+    function textoSeguro(valor) { return valor === null || valor === undefined || valor === '' ? '-' : String(valor); }
+
+    function renderizarSuiteERP(datos) {
+      var resumen = datos.resumen || {};
+      document.getElementById('erpExpedientes').innerText = resumen.expedientes || 0;
+      document.getElementById('erpPedidos').innerText = resumen.pedidos || 0;
+      document.getElementById('erpPorPagar').innerText = formatoMoneda(resumen.porPagar || 0);
+      document.getElementById('erpProveedores').innerText = resumen.proveedores || 0;
+
+      document.getElementById('erpPipelineBody').innerHTML = (datos.pipeline || []).map(function(d) {
+        return '<tr data-search="' + textoSeguro(d.folio_dsa) + ' ' + textoSeguro(d.no_oficio) + ' ' + textoSeguro(d.observaciones) + '"><td style="font-weight:600;">' + textoSeguro(d.folio_dsa) + '</td><td>' + textoSeguro(d.no_oficio) + '</td><td>' + textoSeguro(d.uc_solicitantes && (d.uc_solicitantes.uc_cod + ' - ' + d.uc_solicitantes.uc_denominacion)) + '</td><td>' + textoSeguro(d.servicios && d.servicios.nombre) + '</td><td>' + textoSeguro(d.fecha_recepcion) + '</td><td>' + badgeEstado(d.cancelado_at ? 'Cancelado' : ((d.estatus_tramite && d.estatus_tramite.estatus_tramite) || 'Activo')) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin expedientes DSA</td></tr>';
+
+      document.getElementById('erpComprasBody').innerHTML = (datos.pedidos || []).map(function(p) {
+        var caa = p.caa_autorizaciones || {};
+        return '<tr data-search="' + textoSeguro(p.no_pedido) + ' ' + textoSeguro((p.proveedores || {}).nombre_proveedor) + '"><td style="font-weight:600;">' + textoSeguro(p.no_pedido) + '</td><td>' + textoSeguro(p.fecha_pedido) + '</td><td>' + textoSeguro(p.proveedores && p.proveedores.nombre_proveedor) + '</td><td>' + textoSeguro(caa.folio) + '</td><td>' + textoSeguro(caa.dsa && caa.dsa.folio_dsa) + '</td><td>' + badgeEstado(p.cancelado_at ? 'Cancelado' : ((p.estatus_entrega && p.estatus_entrega.estatus_entrega) || 'En seguimiento')) + '</td></tr>';
+      }).join('') || '<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin pedidos</td></tr>';
+
+      document.getElementById('erpFinanzasBody').innerHTML = (datos.facturacion || []).map(function(f) {
+        var factura = f.facturas || {}, detalle = f.pedidos_detalles || {}, dsaDetalle = detalle.dsa_detalles || {};
+        return '<tr data-search="' + textoSeguro(factura.no_factura) + ' ' + textoSeguro((factura.proveedores || {}).nombre_proveedor) + '"><td style="font-weight:600;">' + textoSeguro(factura.no_factura) + '</td><td>' + textoSeguro(factura.proveedores && factura.proveedores.nombre_proveedor) + '</td><td>' + textoSeguro(detalle.pedidos && detalle.pedidos.no_pedido) + '</td><td>' + textoSeguro(dsaDetalle.catalogo && dsaDetalle.catalogo.descripcion) + '</td><td class="amount">' + formatoMoneda(f.importe_facturado) + '</td><td class="amount">' + formatoMoneda(f.importe_pagado) + '</td><td>' + textoSeguro(f.fecha_pago) + '</td></tr>';
+      }).join('') || '<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin facturación</td></tr>';
+
+      var directorio = (datos.proveedores || []).map(function(p) { return '<tr data-search="' + textoSeguro(p.nombre_proveedor) + ' ' + textoSeguro(p.rfc) + '"><td style="font-weight:600;">' + textoSeguro(p.nombre_proveedor) + '</td><td>' + textoSeguro(p.rfc) + '</td><td>' + textoSeguro(p.giro) + '</td><td>' + textoSeguro(p.correo || p.telefono_1) + '</td><td>' + badgeEstado(p.estado_proveedor) + '</td></tr>'; }).join('');
+      directorio += (datos.pacientes || []).map(function(p) { return '<tr data-search="' + textoSeguro(p.nombre_completo) + ' ' + textoSeguro(p.rud) + '"><td style="font-weight:600;">' + textoSeguro(p.nombre_completo) + '</td><td>' + textoSeguro(p.rud) + '</td><td>Paciente</td><td>-</td><td>' + badgeEstado('Activo') + '</td></tr>'; }).join('');
+      document.getElementById('erpDirectorioBody').innerHTML = directorio || '<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-tertiary);">Sin entidades maestras</td></tr>';
+    }
+
+    function mostrarModuloERP(modulo, boton) {
+      moduloERPActivo = modulo;
+      ['Vision', 'Pipeline', 'Compras', 'Finanzas', 'Directorio'].forEach(function(nombre) { document.getElementById('erpModulo' + name).classList.remove('active'); });
+      document.getElementById('erpModulo' + modulo.charAt(0).toUpperCase() + modulo.slice(1)).classList.add('active');
+      var botones = boton.parentNode.querySelectorAll('button');
+      for (var i = 0; i < botones.length; i++) { botones[i].classList.remove('active'); }
+      boton.classList.add('active');
+      var titulos = { vision: ['Visión general', 'Indicadores clave y accesos directos al flujo institucional.'], pipeline: ['Expedientes DSA', 'Solicitudes, unidades y estado del trámite.'], compras: ['Compras y pedidos', 'Órdenes conectadas con CAA, proveedor y entrega.'], finanzas: ['Finanzas RF', 'Facturación, pagos y saldos operativos.'], directorio: ['Directorio maestro', 'Proveedores y pacientes como entidades de referencia.'] };
+      document.getElementById('erpTituloModulo').innerText = titulos[modulo][0];
+      document.getElementById('erpDescripcionModulo').innerText = titulos[modulo][1];
+      document.getElementById('erpSearch').value = '';
+      filtrarERP();
+    }
+
+    function filtrarERP() {
+      var panel = document.getElementById('erpModulo' + moduloERPActivo.charAt(0).toUpperCase() + moduloERPActivo.slice(1));
+      var filtro = (document.getElementById('erpSearch').value || '').toLowerCase();
+      var filas = panel.querySelectorAll('tbody tr');
+      for (var i = 0; i < filas.length; i++) {
+        var text = (filas[i].getAttribute('data-search') || filas[i].innerText || '').toLowerCase();
+        filas[i].style.display = text.indexOf(filtro) !== -1 ? '' : 'none';
+      }
+    }
+
+    /* --- LÓGICA DE VISOR PDF --- */
+    function mostrarVistaPreviaPdf(input) {
+      if (input.files && input.files[0]) {
+        var file = input.files[0];
+        if (file.type !== 'application/pdf') {
+          showToast('El archivo debe ser un formato PDF.', 'warning');
+          input.value = '';
+          return;
+        }
+        if (currentPdfUrl) { URL.revokeObjectURL(currentPdfUrl); }
+        currentPdfUrl = URL.createObjectURL(file);
+        document.getElementById('pdfViewer').src = currentPdfUrl + '#toolbar=1&navpanes=0';
+        document.getElementById('mainLayout').classList.add('with-preview');
+        document.getElementById('pdfPreviewContainer').style.display = 'flex';
+        showToast('Documento oficial montado en caché.', 'success');
+      }
+    }
+
+    function cerrarVistaPrevia() {
+      if (currentPdfUrl) { URL.revokeObjectURL(currentPdfUrl); currentPdfUrl = null; }
+      document.getElementById('pdfViewer').src = '';
+      document.getElementById('pdfPreviewContainer').style.display = 'none';
+      document.getElementById('mainLayout').classList.remove('with-preview');
+      document.getElementById('pdfFile').value = '';
+    }
+
+    /* --- ENLACE CON EL ORQUESTADOR AUTOMATIZADO (DRIVE + GEMINI API) --- */
+    function procesarOficioConIA() {
+      var fileInput = document.getElementById('pdfFile');
+      if (!fileInput.files || fileInput.files.length === 0) {
+        showToast('Seleccione un archivo PDF primero.', 'warning');
+        return;
+      }
+      var file = fileInput.files[0];
+      var reader = new FileReader();
+      var btn = document.getElementById('btnGemini');
+      btn.disabled = true;
+      btn.innerHTML = '<div class="loading-spinner" style="width:16px;height:16px;border-width:2px;margin:0;border-top-color:white;"></div> Extrayendo con IA…';
+      
+      showToast('Sincronizando con Google Drive y procesando con Gemini...', 'neutral');
+
+      reader.onload = function(e) {
+        var base64Data = e.target.result.split(',')[1];
+        
+        // Obtenemos el nombre textual de la UC seleccionada actualmente como fallback
+        var selectUcEl = document.getElementById('id_uc');
+        var ucNombreFallback = selectUcEl.selectedIndex !== -1 ? selectUcEl.options[selectUcEl.selectedIndex].text : "Unidad_DSA";
+
+        // Ejecutamos el orquestador nativo en el servidor (Crea carpeta Drive y corre Gemini)
+        google.script.run
+          .withSuccessHandler(function(response) {
+            if (response.status === "ERROR") {
+              showToast(response.error, 'error');
+              btn.disabled = false;
+              btn.innerHTML = 'Analizar con IA';
+              return;
+            }
+
+            var payload = response.data;
+            showToast('Expediente creado en Google Drive: ' + payload.folioGenerado, 'success');
+            
+            // Seteamos las variables globales de las referencias cruzadas de Drive
+            currentDriveFolderId = payload.driveFolderId;
+            currentDriveFileId = payload.driveFileId;
+
+            // Rellenamos de inmediato el formulario
+            if (payload.formularioMapeado.folio_dsa) document.getElementById('folio_dsa').value = payload.formularioMapeado.folio_dsa;
+            if (payload.formularioMapeado.no_oficio) document.getElementById('no_oficio').value = payload.formularioMapeado.no_oficio;
+            if (payload.formularioMapeado.fecha_recepcion) document.getElementById('fecha_recepcion').value = payload.formularioMapeado.fecha_recepcion;
+            if (payload.formularioMapeado.observaciones) document.getElementById('observaciones').value = payload.formularioMapeado.observaciones;
+
+            // Autocompletado reactivo de Unidad Solicitante (id_uc)
+            if (payload.formularioMapeado.uc_cod_sugerido) {
+              var selectUc = document.getElementById('id_uc');
+              for (var i = 0; i < selectUc.options.length; i++) {
+                if (selectUc.options[i].text.indexOf(payload.formularioMapeado.uc_cod_sugerido) !== -1) {
+                  selectUc.selectedIndex = i;
+                  break;
+                }
+              }
+            }
+
+            // RENDERIZADO DEL BADGE REACTIVO PARA LA NEGATIVA DE EXISTENCIA (DOC-02)
+            var badgeContainer = document.getElementById('negativaBadgeContainer');
+            if (payload.formularioMapeado.negativa_validada_previas) {
+              badgeContainer.innerHTML = '<span class="badge badge-success" style="padding: 8px 12px;">Validada (' + payload.formularioMapeado.fecha_negativa + ')</span>';
+              showToast('DOC-02: Negativa de Existencia validada cronológicamente.', 'success');
+            } else {
+              badgeContainer.innerHTML = '<span class="badge badge-danger" style="padding: 8px 12px;">No detectada en PDF</span>';
+              showToast('Alerta: No se localizó la hoja de Negativa en el escaneo.', 'warning');
+            }
+
+            // Rellenamos la tabla dinámica de artículos
+            if (payload.formularioMapeado.articulos && payload.formularioMapeado.articulos.length > 0) {
+              document.getElementById('tablaDetalles').innerHTML = ''; // Limpiar mocks
+              payload.formularioMapeado.articulos.forEach(function(art) {
+                agregarFilaArticuloConValores(art.codigo_art || '', art.cantidad || 1, art.precio_unitario || '');
+              });
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path></svg> Analizar con IA y Crear Drive Folder';
+          })
+          .withFailureHandler(function(error) {
+            showToast('Fallo en la comunicación con el servidor: ' + error.message, 'error');
+            btn.disabled = false;
+            btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path></svg> Analizar con IA y Crear Drive Folder';
+          })
+          .procesarCargaOficioInicial(base64Data, ucNombreFallback);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    /* --- LÓGICA DE TABLA DETALLES --- */
+    function agregarFilaArticulo() { agregarFilaArticuloConValores('', 1, ''); }
+
+    function agregarFilaArticuloConValores(codigo, cantidad, precio) {
+      var tbody = document.getElementById('tablaDetalles');
+      var row = document.createElement('tr');
+      row.className = 'fila-articulo';
+      var optCatalogo = ['<option value="">Seleccione…</option>'];
+      cacheCatalogo.forEach(function(art) {
+        var selected = art.codigo_art === codigo ? 'selected' : '';
+        optCatalogo.push('<option value="' + art.codigo_art + '" ' + selected + '>' + art.codigo_art + ' - ' + art.descripcion + '</option>');
+      });
+      var optPacientes = ['<option value="">Ninguno / General</option>'];
+      cachePacientes.forEach(function(pac) {
+        optPacientes.push('<option value="' + pac.id_paciente + '">' + pac.nombre_completo + '</option>');
+      });
+      row.innerHTML = [
+        '<td><select name="codigo_art" required onchange="detectarCambioArticulo(this)" class="table-select">' + optCatalogo.join('') + '</select></td>',
+        '<td><input type="number" name="cantidad" min="1" value="' + (cantidad || 1) + '" required class="table-input"></td>',
+        '<td><select name="id_paciente" class="table-select">' + optPacientes.join('') + '</select></td>',
+        '<td><input type="number" step="0.01" name="precio_unitario" value="' + (precio || '') + '" required class="table-input"></td>',
+        '<td><button type="button" class="btn btn-ghost" onclick="eliminarFila(this)"><svg class="icon-sm" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></td>'
+      ].join('');
+      tbody.appendChild(row);
+    }
+
+    function detectarCambioArticulo(selectElement) {
+      var codigoSeleccionado = selectElement.value;
+      var fila = selectElement.closest('tr');
+      var inputPrecio = fila.querySelector('[name="precio_unitario"]');
+      var articuloEncontrado = cacheCatalogo.find(function(art) { return art.codigo_art === codigoSeleccionado; });
+      if (articuloEncontrado) { inputPrecio.value = articuloEncontrado.precio_sin_iva; } 
+      else { inputPrecio.value = ''; }
+    }
+
+    function eliminarFila(btn) {
+      var filas = document.getElementsByClassName('fila-articulo');
+      if (filas.length > 1) { btn.closest('tr').remove(); } 
+      else { showToast('El trámite debe contener al menos un artículo.', 'warning'); }
+    }
+
+    function limpiarFormulario() {
+      document.getElementById('dsaForm').reset();
+      document.getElementById('tablaDetalles').innerHTML = '';
+      document.getElementById('negativaBadgeContainer').innerHTML = '<span class="badge badge-neutral" style="padding: 8px 12px;">Sin procesar archivo</span>';
+      currentDriveFolderId = null;
+      currentDriveFileId = null;
+      agregarFilaArticulo();
+      cerrarVistaPrevia();
+    }
+
+    /* --- ENVÍO DE FORMULARIO A BASE DE DATOS (SUPABASE) --- */
+    function enviarFormulario(event) {
+      event.preventDefault();
+      var btn = document.getElementById('btnGuardar');
+      btn.disabled = true;
+      btn.innerHTML = '<div class="loading-spinner" style="width:16px;height:16px;border-width:2px;margin:0;border-top-color:white;"></div> Guardando…';
+
+      var cabecera = {
+        folio_dsa: document.getElementById('folio_dsa').value,
+        id_tramite: document.getElementById('id_tramite').value ? Number(document.getElementById('id_tramite').value) : null,
+        id_uc: document.getElementById('id_uc').value ? Number(document.getElementById('id_uc').value) : null,
+        fecha_recepcion: document.getElementById('fecha_recepcion').value || null,
+        id_servicio: document.getElementById('id_servicio').value ? Number(document.getElementById('id_servicio').value) : null,
+        no_oficio: document.getElementById('no_oficio').value || null,
+        id_usuario: document.getElementById('id_usuario').value ? Number(document.getElementById('id_usuario').value) : null,
+        id_estatus_tramite: document.getElementById('id_estatus_tramite').value ? Number(document.getElementById('id_estatus_tramite').value) : null,
+        observaciones: document.getElementById('observaciones').value || null,
+        
+        // INTEGRACIÓN SOBERANA DE DRIVE: Inyectamos los IDs de Google Drive en el payload relacional de Supabase
+        drive_folder_id: currentDriveFolderId,
+        drive_file_id: currentDriveFileId
+      };
+
+      var detalles = [];
+      var filas = document.getElementsByClassName('fila-articulo');
+      for (var i = 0; i < filas.length; i++) {
+        var fila = filas[i];
+        detalles.push({
+          codigo_art: fila.querySelector('[name="codigo_art"]').value,
+          cantidad: Number(fila.querySelector('[name="cantidad"]').value),
+          id_paciente: fila.querySelector('[name="id_paciente"]').value ? Number(fila.querySelector('[name="id_paciente"]').value) : null,
+          precio_unitario: Number(fila.querySelector('[name="precio_unitario"]').value)
+        });
+      }
+
+      google.script.run
+        .withSuccessHandler(function(folioConfirmado) {
+          showToast('Expediente y Sincronización guardados en Supabase. Folio: ' + folioConfirmado, 'success');
+          limpiarFormulario();
+          btn.disabled = false;
+          btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg> Guardar en Supabase';
+          cargarDashboardView();
+        })
+        .withFailureHandler(function(error) {
+          showToast('Error de inserción en Supabase: ' + error.message, 'error');
+          btn.disabled = false;
+          btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg> Guardar en Supabase';
+        })
+        .guardarCompraDesdeForm({ cabecera: cabecera, detalles: detalles });
+    }
+  </script>
+</body>
+</html>
