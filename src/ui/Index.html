@@ -1,0 +1,123 @@
+/* --- CONTROLADOR DE VISTAS Y PDF PREVIEW (APPLE HIG STYLE) --- */
+
+/**
+* Toma el binario del PDF seleccionado, genera una URL local de blob
+* y expande la interfaz web al modo de pantalla dividida ('with-preview').
+*/
+function mostrarVistaPreviaPdf(input) {
+if (input.files && input.files[0]) {
+var file = input.files[0];
+if (file.type !== 'application/pdf') {
+showToast('El archivo cargado debe ser obligatoriamente un formato PDF.', 'warning');
+input.value = '';
+return;
+}
+
+// Revocar URL de blob anterior para optimizar la gestión de memoria del navegador
+if (currentPdfUrl) {
+URL.revokeObjectURL(currentPdfUrl);
+}
+
+currentPdfUrl = URL.createObjectURL(file);
+
+// Inyectar el PDF en el visor nativo incrustado del navegador dentro del iframe
+document.getElementById('pdfViewer').src = currentPdfUrl + '#toolbar=1&navpanes=0&view=FitH';
+
+// Transición fluida CSS agregando la columna lateral derecha de previsualización
+document.getElementById('mainLayout').classList.add('with-preview');
+document.getElementById('pdfPreviewContainer').style.display = 'flex';
+
+showToast('Documento oficial cargado en la caché del visualizador.', 'success');
+}
+}
+
+/**
+* Cierra la previsualización del documento original y contrae el formulario a su ancho base.
+*/
+function cerrarVistaPrevia() {
+if (currentPdfUrl) {
+URL.revokeObjectURL(currentPdfUrl);
+currentPdfUrl = null;
+}
+document.getElementById('pdfViewer').src = '';
+document.getElementById('pdfPreviewContainer').style.display = 'none';
+document.getElementById('mainLayout').classList.remove('with-preview');
+document.getElementById('pdfFile').value = '';
+}
+
+/* --- INTEGRACIÓN CON EL MOTOR COGNITIVO GEMINI 1.5 FLASH --- */
+
+/**
+* Lee el archivo cargado en el input, lo convierte a Base64 y lo envía al motor asíncrono
+* en el servidor para el análisis OCR semántico.
+*/
+function procesarOficioConIA() {
+var fileInput = document.getElementById('pdfFile');
+if (!fileInput.files || fileInput.files.length === 0) {
+showToast('Por favor, seleccione o arrastre un archivo PDF para analizar.', 'warning');
+return;
+}
+
+var file = fileInput.files[0];
+var reader = new FileReader();
+var btn = document.getElementById('btnGemini');
+
+// Bloquear interfaz del botón inyectando un Spinner CSS Premium
+btn.disabled = true;
+btn.innerHTML = '<div class="loading-spinner"
+    style="width:16px;height:16px;border-width:2px;margin:0;border-top-color:white;"></div> Procesando con Gemini…';
+
+showToast('Iniciando extracción con inteligencia artificial...', 'neutral');
+
+reader.onload = function(e) {
+// Aislar la cadena pura Base64 removiendo el prefijo "data:application/pdf;base64,"
+var base64Data = e.target.result.split(',')[1];
+
+// Ejecución del canal RPC nativo hacia Google Apps Script
+google.script.run
+.withSuccessHandler(function(resultadoIA) {
+showToast('Análisis cognitivo finalizado con éxito. Por favor, valide la información.', 'success');
+
+// Mapear campos base extraídos automáticamente
+if (resultadoIA.folio_dsa) document.getElementById('folio_dsa').value = resultadoIA.folio_dsa;
+if (resultadoIA.no_oficio) document.getElementById('no_oficio').value = resultadoIA.no_oficio;
+if (resultadoIA.fecha_recepcion) document.getElementById('fecha_recepcion').value = resultadoIA.fecha_recepcion;
+if (resultadoIA.observaciones) document.getElementById('observaciones').value = resultadoIA.observaciones;
+
+// Búsqueda inteligente e indexación del código de la Unidad Compradora sugerida
+if (resultadoIA.uc_cod_sugerido) {
+var selectUc = document.getElementById('id_uc');
+for (var i = 0; i < selectUc.options.length; i++) { if (selectUc.options[i].text.indexOf(resultadoIA.uc_cod_sugerido)
+    !==-1) { selectUc.selectedIndex=i; break; } } } // Renderizar dinámicamente las filas de los artículos detectados
+    por el OCR if (resultadoIA.articulos && resultadoIA.articulos.length> 0) {
+    document.getElementById('tablaDetalles').innerHTML = ''; // Limpiar mocks o registros previos
+
+    resultadoIA.articulos.forEach(function(art) {
+    // Si la IA detecta un código que haga match exacto con tu catálogo, lo autoselecciona,
+    // de lo contrario inserta una fila en blanco mapeando la cantidad para revisión del usuario
+    agregarFilaArticuloConValores(art.codigo_art || '', art.cantidad || 1, art.precio_unitario || '');
+    });
+    }
+
+    // Restaurar estado nativo del botón premium
+    btn.disabled = false;
+    btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24">
+        <path
+            d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z">
+        </path>
+    </svg> Analizar con IA';
+    })
+    .withFailureHandler(function(error) {
+    showToast('Error en el análisis de IA: ' + error.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<svg class="icon-sm" viewBox="0 0 24 24">
+        <path
+            d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z">
+        </path>
+    </svg> Analizar con IA';
+    })
+    .analizarPdfDesdeCliente(base64Data);
+    };
+
+    reader.readAsDataURL(file);
+    }
